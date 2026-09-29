@@ -1,25 +1,52 @@
 # Publish x86_64 glibc XBPS packages from owned templates.
-const RELEASE_TAG = 'x86_64-current'
+const REPOSITORY_PATH = 'x86_64-current'
+const R2_BUCKET = 'void-extra'
+const MAX_PACKAGE_FILES = 32
+const MAX_PUBLISH_BYTES = 1_073_741_824
+# Keep the repository below R2's 10 GB-month Standard free allowance.
+const MAX_BUCKET_BYTES = 8_589_934_592
 
-def download-published-commit []: nothing -> bool {
-    let release = gh release view $RELEASE_TAG | complete
+def published-commit []: nothing -> string {
+    let key = $"($REPOSITORY_PATH)/source-sha"
 
-    if $release.exit_code == 0 {
-        (gh release download $RELEASE_TAG --dir . --pattern source-sha | complete).exit_code == 0
-    } else { false }
+    let marker = (aws --endpoint-url $env.R2_ENDPOINT s3api get-object
+        --bucket $R2_BUCKET --key $key source-sha --output json | complete)
+
+    if $marker.exit_code == 0 {
+        let published = open source-sha | str trim
+
+        if ($published | is-empty) {
+            r2-fail 'R2 source-sha is empty'
+        }
+
+        return $published
+    }
+
+    let index_key = $"($REPOSITORY_PATH)/x86_64-repodata"
+
+    let listing = (r2 ...[s3api list-objects-v2 --bucket $R2_BUCKET
+        --prefix $index_key --output json] | from json)
+
+    if ($listing.Contents? | default [] | any {|object| $object.Key == $index_key }) {
+        r2-fail 'R2 has a repository but no source-sha; seed the published commit before cutover'
+    }
+
+    ''
 }
 
 def select-changes []: nothing -> nothing {
-    let published = if (download-published-commit) and ('source-sha' | path exists) {
-        open source-sha | str trim
-    } else { null }
+    let published = (published-commit)
 
-    let valid = if $published == null { false } else {
+    let valid = if $published == '' { false } else {
         let commit = git cat-file -e $"($published)^{commit}" | complete
 
         if $commit.exit_code != 0 { false } else {
             (git merge-base --is-ancestor $published HEAD | complete).exit_code == 0
         }
+    }
+
+    if $published != '' and not $valid {
+        r2-fail 'R2 source-sha is not an ancestor of this commit'
     }
 
     let files = if $valid {
@@ -86,19 +113,63 @@ def collect []: nothing -> nothing {
     }
 }
 
-def restore []: nothing -> nothing {
-    let release = gh release view $RELEASE_TAG | complete
+def fetch-index []: nothing -> nothing {
+    mkdir repo
 
-    if $release.exit_code == 0 {
-        gh release download $RELEASE_TAG --dir repo --pattern '*.xbps' --pattern '*.xbps.sig2'
-    } else {
-        gh release create $RELEASE_TAG --target $env.GITHUB_SHA --title $RELEASE_TAG --notes 'Signed x86_64 glibc XBPS packages.'
+    transfer-r2 ...[
+        s3
+        cp
+        $"s3://($R2_BUCKET)/($REPOSITORY_PATH)/x86_64-repodata"
+        repo/x86_64-repodata
+        --only-show-errors
+    ]
+}
+
+def indexed-packages []: nothing -> list<record> {
+    let catalog = xbps-query -i --repository repo -s '' | complete
+
+    if $catalog.exit_code != 0 or ($catalog.stdout | is-empty) {
+        r2-fail 'Cannot read the signed R2 repository index'
+    }
+
+    let versions = ($catalog.stdout | lines |
+        parse --regex '^\[[^]]+\]\s+(?<version>\S+)' | get version)
+
+    if ($versions | is-empty) or ($versions | length) != ($catalog.stdout | lines | length) {
+        r2-fail 'Cannot identify all packages in the R2 repository index'
+    }
+
+    $versions | each {|version|
+        let architecture = xbps-query -i --repository repo -p architecture -S $version | str trim
+        let checksum = xbps-query -i --repository repo -p filename-sha256 -S $version | str trim
+
+        if ($architecture | is-empty) or ($checksum | is-empty) {
+            r2-fail $"Incomplete R2 repository index entry: ($version)"
+        }
+
+        {filename: $"($version).($architecture).xbps", checksum: $checksum}
+    }
+}
+
+def restore []: nothing -> nothing {
+    fetch-index
+    let prefix = $"s3://($R2_BUCKET)/($REPOSITORY_PATH)/"
+
+    for package in (indexed-packages) {
+        for asset in [$package.filename $"($package.filename).sig2"] {
+            transfer-r2 ...[s3 cp $"($prefix)($asset)" $"repo/($asset)" --only-show-errors]
+        }
+
+        let actual = sha256sum $"repo/($package.filename)" | split words | first
+
+        if $actual != $package.checksum {
+            r2-fail $"R2 package does not match its signed index: ($package.filename)"
+        }
     }
 }
 
 def sign []: nothing -> nothing {
     check-key
-    '' | save --force obsolete-assets
 
     for current in (glob 'new/*.xbps') {
         let pkgver = xbps-uhelper binpkgver $current | str trim
@@ -109,9 +180,6 @@ def sign []: nothing -> nothing {
             let oldname = xbps-uhelper getpkgname $oldver | str trim
 
             if $oldname == $name and ($old | path basename) != ($current | path basename) {
-                $"($old | path basename)\n($old | path basename).sig2\n"
-                | save --append obsolete-assets
-
                 rm --force $old $"($old).sig2"
             }
         }
@@ -154,12 +222,6 @@ def sign []: nothing -> nothing {
     rm --force $key
 }
 
-const R2_BUCKET = 'void-extra'
-const MAX_PACKAGE_FILES = 32
-const MAX_PUBLISH_BYTES = 1_073_741_824
-# Keep the mirror below R2's 10 GB-month Standard free allowance.
-const MAX_BUCKET_BYTES = 8_589_934_592
-
 def r2-fail [message: string]: nothing -> error {
     error make {
         msg: $message
@@ -180,11 +242,11 @@ def r2 [...arguments: string]: nothing -> string {
     $result.stdout
 }
 
-def upload-r2 [...arguments: string]: nothing -> nothing {
+def transfer-r2 [...arguments: string]: nothing -> nothing {
     let output = (r2 ...$arguments)
 
     if ($output | is-not-empty) {
-        r2-fail $"Unexpected R2 upload output: ($output)"
+        r2-fail $"Unexpected R2 transfer output: ($output)"
     }
 }
 
@@ -205,13 +267,13 @@ def publish-r2 []: nothing -> nothing {
         r2-fail 'R2 publish exceeds the package size limit'
     }
 
-    let prefix = $"($RELEASE_TAG)/"
+    let prefix = $"($REPOSITORY_PATH)/"
 
     let listing = (r2 ...[s3api list-objects-v2 --no-paginate --bucket $R2_BUCKET
         --output json] | from json)
 
     if $listing.IsTruncated {
-        r2-fail 'R2 mirror contains too many objects to check safely'
+        r2-fail 'R2 repository contains too many objects to check safely'
     }
 
     let objects = $listing.Contents? | default []
@@ -246,11 +308,11 @@ def publish-r2 []: nothing -> nothing {
     }
 
     if ($stored_bytes + $upload_bytes) > $MAX_BUCKET_BYTES {
-        r2-fail 'R2 mirror would exceed its storage safety limit'
+        r2-fail 'R2 repository would exceed its storage safety limit'
     }
 
     for item in $pending {
-        upload-r2 ...[
+        transfer-r2 ...[
             s3
             cp
             $item.file
@@ -263,7 +325,7 @@ def publish-r2 []: nothing -> nothing {
         ]
     }
 
-    upload-r2 ...[
+    transfer-r2 ...[
         s3
         cp
         repo/x86_64-repodata
@@ -274,48 +336,18 @@ def publish-r2 []: nothing -> nothing {
     ]
 }
 
-def mirror-r2 []: nothing -> nothing {
-    if not ('repo/x86_64-repodata' | path exists) {
-        let index_key = $"($RELEASE_TAG)/x86_64-repodata"
-
-        let listing = (r2 ...[s3api list-objects-v2 --no-paginate --bucket $R2_BUCKET
-            --prefix $index_key --output json] | from json)
-
-        if ($listing.Contents? | default [] | any {|object| $object.Key == $index_key }) {
-            return
-        }
-
-        mkdir repo
-
-        let release = (gh release download $RELEASE_TAG --dir repo --pattern '*.xbps'
-            --pattern '*.xbps.sig2' --pattern x86_64-repodata | complete)
-
-        if $release.exit_code != 0 {
-            r2-fail $"Could not restore signed release: ($release.stderr | str trim)"
-        }
-    }
-
-    publish-r2
-}
-
-def prepare-publish []: nothing -> list<string> {
-    let obsolete = open obsolete-assets | lines
+def record-r2 []: nothing -> nothing {
     $"($env.GITHUB_SHA)\n" | save --force source-sha
-    $obsolete
-}
 
-def publish []: nothing -> nothing {
-    let obsolete = (prepare-publish)
-    let packages = (glob 'repo/*.xbps')
-    let signatures = (glob 'repo/*.xbps.sig2')
-    gh release upload $RELEASE_TAG ...$packages ...$signatures --clobber
-    gh release upload $RELEASE_TAG repo/x86_64-repodata --clobber
-
-    for asset in $obsolete {
-        gh release delete-asset $RELEASE_TAG $asset --yes
-    }
-
-    gh release upload $RELEASE_TAG source-sha --clobber
+    transfer-r2 ...[
+        s3
+        cp
+        source-sha
+        $"s3://($R2_BUCKET)/($REPOSITORY_PATH)/source-sha"
+        --cache-control
+        no-store
+        --only-show-errors
+    ]
 }
 
 def main []: nothing -> nothing {
@@ -341,6 +373,6 @@ def "main restore" []: nothing -> nothing { restore }
 
 def "main sign" []: nothing -> nothing { sign }
 
-def "main publish" []: nothing -> nothing { publish }
+def "main publish" []: nothing -> nothing { publish-r2 }
 
-def "main mirror-r2" []: nothing -> nothing { mirror-r2 }
+def "main record" []: nothing -> nothing { record-r2 }

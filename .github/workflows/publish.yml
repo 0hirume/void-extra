@@ -5,7 +5,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: x86_64-current
@@ -32,7 +32,7 @@ jobs:
           set -eu
           xbps-install -Syu xbps
           xbps-install -yu
-          xbps-install -y bash git curl sudo github-cli nushell aws-cli
+          xbps-install -y bash git curl sudo nushell aws-cli
           useradd -G xbuilder -M builder
 
       - name: checkout owned templates
@@ -46,8 +46,10 @@ jobs:
         id: changes
         working-directory: owned
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
         run: nu .github/scripts/publish.nu changes
 
       - name: check signing key
@@ -80,11 +82,13 @@ jobs:
           PACKAGES: ${{ steps.changes.outputs.packages }}
         run: nu owned/.github/scripts/publish.nu collect
 
-      - name: restore current release assets
+      - name: restore current R2 repository
         if: steps.changes.outputs.packages != ''
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
         run: nu owned/.github/scripts/publish.nu restore
 
       - name: merge and sign repository
@@ -93,20 +97,19 @@ jobs:
           XBPS_PRIVATE_KEY: ${{ secrets.XBPS_PRIVATE_KEY }}
         run: nu owned/.github/scripts/publish.nu sign
 
-      # Do not advance the Releases source-sha if the R2 mirror fails.
-      - name: mirror signed repository to R2
+      - name: publish signed repository to R2
+        if: steps.changes.outputs.packages != ''
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
           R2_ENDPOINT: https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-        run: nu owned/.github/scripts/publish.nu mirror-r2
-
-      - name: publish packages before index
-        if: steps.changes.outputs.packages != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
         run: nu owned/.github/scripts/publish.nu publish
+
+      - name: record published commit after the signed index
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+        run: nu owned/.github/scripts/publish.nu record
