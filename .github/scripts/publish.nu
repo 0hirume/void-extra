@@ -350,6 +350,66 @@ def record-r2 []: nothing -> nothing {
     ]
 }
 
+def prune-r2 []: nothing -> nothing {
+    fetch-index
+    let packages = indexed-packages
+    let prefix = $"($REPOSITORY_PATH)/"
+
+    let active = ($packages | each {|package|
+        [$"($prefix)($package.filename)" $"($prefix)($package.filename).sig2"]
+    } | flatten)
+
+    let listing = (r2 ...[s3api list-objects-v2 --no-paginate --bucket $R2_BUCKET
+        --prefix $prefix --output json] | from json)
+
+    if $listing.IsTruncated {
+        r2-fail 'R2 repository contains too many objects to prune safely'
+    }
+
+    let objects = $listing.Contents? | default []
+    let available = $objects | get Key
+
+    if ($active | any {|key| $key not-in $available }) {
+        r2-fail 'R2 repository index references missing package assets; refusing cleanup'
+    }
+
+    let index_key = $"($prefix)x86_64-repodata"
+    let index_object = $objects | where Key == $index_key | first
+    let cutoff = (date now) - 1day
+
+    # Even a much older package may have become obsolete with the current index.
+    if ($index_object.LastModified | into datetime) > $cutoff {
+        return
+    }
+
+    mut stale = []
+
+    for object in $objects {
+        let key = $object.Key
+        let filename = $key | str replace $prefix ''
+        let is_package = ($filename | str ends-with .xbps) or ($filename | str ends-with .xbps.sig2)
+
+        if $is_package and ($filename !~ /) and ($key not-in $active) and (($object.LastModified | into datetime) < $cutoff) {
+            $stale ++= [$object]
+        }
+    }
+
+    for object in $stale {
+        r2 ...[
+            s3api
+            delete-object
+            --bucket
+            $R2_BUCKET
+            --key
+            $object.Key
+            --output
+            json
+        ]
+
+        print $"Deleted stale R2 object: ($object.Key)"
+    }
+}
+
 def main []: nothing -> nothing {
     print --stderr 'Specify a publish phase'
     exit 2
@@ -376,3 +436,5 @@ def "main sign" []: nothing -> nothing { sign }
 def "main publish" []: nothing -> nothing { publish-r2 }
 
 def "main record" []: nothing -> nothing { record-r2 }
+
+def "main prune" []: nothing -> nothing { prune-r2 }

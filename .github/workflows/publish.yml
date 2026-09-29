@@ -1,8 +1,10 @@
-name: publish x86_64 xbps repository
+name: publish
 
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: '0 3 * * *'
 
 permissions:
   contents: read
@@ -13,6 +15,7 @@ concurrency:
 
 jobs:
   publish:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/void-linux/void-glibc-full@sha256:c23266033da422c47d350ae3f7bb4fdfecf543cc7693a90d1f343960f9767c57
@@ -113,3 +116,33 @@ jobs:
           AWS_DEFAULT_REGION: auto
           R2_ENDPOINT: https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
         run: nu owned/.github/scripts/publish.nu record
+
+  prune:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/void-linux/void-glibc-full@sha256:c23266033da422c47d350ae3f7bb4fdfecf543cc7693a90d1f343960f9767c57
+    defaults:
+      run:
+        shell: nu {0}
+    steps:
+      - name: prepare prune container
+        shell: sh
+        run: |
+          set -eu
+          xbps-install -Syu xbps
+          xbps-install -yu
+          xbps-install -y nushell aws-cli
+
+      - name: checkout publisher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: delete stale R2 packages
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+        run: nu .github/scripts/publish.nu prune
