@@ -1,7 +1,7 @@
 # Template file for 'mitos-nightly'
 pkgname=mitos-nightly
 version=20260928
-revision=2
+revision=3
 commit=e57992d43a8815b92c007885d819bad9d0a76e56
 wrksrc="${pkgname}-${version}"
 build_style=cargo
@@ -25,8 +25,22 @@ do_fetch() {
 export PATH="$PATH:/usr/libexec/chroot-git"
 export MITOS_DEFAULT_RUNTIME=/usr/lib/mitos/runtime
 
+do_build() {
+	: ${make_cmd:=cargo auditable}
+	: ${make_verbose:=-v}
+
+	${make_cmd} build ${XBPS_VERBOSE+${make_verbose}} --profile opt --locked --target ${RUST_TARGET} ${configure_args} ${make_build_args}
+}
+
+do_check() {
+	: ${make_cmd:=cargo auditable}
+	: ${make_verbose:=-v}
+
+	${make_check_pre} ${make_cmd} test ${XBPS_VERBOSE+${make_verbose}} --profile opt --locked --target ${RUST_TARGET} ${configure_args} ${make_check_args}
+}
+
 do_install() {
-	vbin target/${RUST_TARGET}/release/ms
+	vbin target/${RUST_TARGET}/opt/ms
 }
 
 post_install() {
