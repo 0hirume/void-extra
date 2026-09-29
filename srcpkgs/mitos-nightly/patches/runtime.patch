@@ -1,0 +1,11 @@
+--- a/crates/loader/src/lib.rs
++++ b/crates/loader/src/lib.rs
+@@ -74,7 +74,7 @@ fn prioritize_runtime_dirs() -> Vec<PathBuf> {
+     const RT_DIR: &str = "runtime";
+     // Adding higher priority first
+     let mut rt_dirs = Vec::new();
+-    if let Some(dir) = option_env!("CARGO_MANIFEST_DIR") {
++    if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
+         // Product crates live under `crates/`, two levels below the workspace root.
+         let path = PathBuf::from(dir)
+             .parent()

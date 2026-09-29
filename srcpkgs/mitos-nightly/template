@@ -1,7 +1,7 @@
 # Template file for 'mitos-nightly'
 pkgname=mitos-nightly
 version=20260928
-revision=1
+revision=2
 commit=e57992d43a8815b92c007885d819bad9d0a76e56
 wrksrc="${pkgname}-${version}"
 build_style=cargo
