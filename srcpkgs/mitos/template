@@ -1,0 +1,30 @@
+# Template file for 'mitos'
+pkgname=mitos
+version=20260929.1.1
+revision=1
+build_style=cargo
+short_desc="Modal terminal text editor"
+maintainer="ohirume <0uhirume@gmail.com>"
+license="MPL-2.0"
+homepage="https://github.com/0hirume/mitos"
+distfiles="https://github.com/0hirume/mitos/releases/download/nightly-${version}/mitos-nightly-${version}-source.tar.xz"
+checksum=acd43802f4ea0d1a85dfaba922ebf7ec23c821796a4b5d82a13a604ccb72cf55
+
+# The build checks the bundled grammar repositories with Git.
+export PATH="$PATH:/usr/libexec/chroot-git"
+export MITOS_DEFAULT_RUNTIME=/usr/lib/mitos/runtime
+
+do_install() {
+	vbin target/${RUST_TARGET}/release/ms
+}
+
+post_install() {
+	rm -rf runtime/grammars/sources
+
+	for shell in bash zsh fish; do
+		vcompletion contrib/completion/ms.${shell} ${shell} ms
+	done
+
+	vmkdir usr/lib/mitos
+	vcopy runtime usr/lib/mitos
+}
