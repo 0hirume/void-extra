@@ -38,7 +38,6 @@ def check-key []: nothing -> nothing {
     if ($env.XBPS_PRIVATE_KEY | is-empty) {
         error make {
             msg: 'Missing XBPS_PRIVATE_KEY secret'
-
             label: {
                 text: 'Signing key supplied by the workflow'
                 span: (metadata $env.XBPS_PRIVATE_KEY).span
@@ -78,7 +77,6 @@ def collect []: nothing -> nothing {
         if not $found {
             error make {
                 msg: $"Missing binary package: ($pkg)"
-
                 label: {
                     text: 'Requested package'
                     span: (metadata $pkg).span
@@ -142,7 +140,6 @@ def sign []: nothing -> nothing {
         if not ($index | path exists) {
             error make {
                 msg: 'Missing signed repository index'
-
                 label: {
                     text: 'Expected index path'
                     span: (metadata $index).span
@@ -155,6 +152,150 @@ def sign []: nothing -> nothing {
     }
 
     rm --force $key
+}
+
+const R2_BUCKET = 'void-extra'
+const MAX_PACKAGE_FILES = 32
+const MAX_PUBLISH_BYTES = 1_073_741_824
+# Keep the mirror below R2's 10 GB-month Standard free allowance.
+const MAX_BUCKET_BYTES = 8_589_934_592
+
+def r2-fail [message: string]: nothing -> error {
+    error make {
+        msg: $message
+        label: {
+            text: 'R2 publisher'
+            span: (metadata $message).span
+        }
+    }
+}
+
+def r2 [...arguments: string]: nothing -> string {
+    let result = aws --endpoint-url $env.R2_ENDPOINT ...$arguments | complete
+
+    if $result.exit_code != 0 {
+        r2-fail $"R2 request failed: ($result.stderr | str trim)"
+    }
+
+    $result.stdout
+}
+
+def upload-r2 [...arguments: string]: nothing -> nothing {
+    let output = (r2 ...$arguments)
+
+    if ($output | is-not-empty) {
+        r2-fail $"Unexpected R2 upload output: ($output)"
+    }
+}
+
+def publish-r2 []: nothing -> nothing {
+    let files = ((glob 'repo/*.xbps') ++ (glob 'repo/*.xbps.sig2'))
+
+    if ($files | is-empty) {
+        r2-fail 'R2 publish has no package files'
+    }
+
+    if ($files | length) > $MAX_PACKAGE_FILES {
+        r2-fail 'R2 publish exceeds the package file limit'
+    }
+
+    let local_bytes = $files | each {|file| (ls $file | get size | first | into int) } | math sum
+
+    if $local_bytes > $MAX_PUBLISH_BYTES {
+        r2-fail 'R2 publish exceeds the package size limit'
+    }
+
+    let prefix = $"($RELEASE_TAG)/"
+
+    let listing = (r2 ...[s3api list-objects-v2 --no-paginate --bucket $R2_BUCKET
+        --output json] | from json)
+
+    if $listing.IsTruncated {
+        r2-fail 'R2 mirror contains too many objects to check safely'
+    }
+
+    let objects = $listing.Contents? | default []
+
+    let stored_bytes = if ($objects | is-empty) { 0 } else {
+        $objects | get Size | math sum
+    }
+
+    mut pending = []
+
+    for file in $files {
+        let key = $"($prefix)($file | path basename)"
+        let digest = sha256sum $file | split words | first
+        let existing = $objects | where Key == $key
+
+        if ($existing | is-not-empty) {
+            let metadata = (r2 ...[s3api head-object --bucket $R2_BUCKET --key $key
+                --output json] | from json)
+
+            if $metadata.Metadata.sha256? != $digest {
+                r2-fail $"R2 object changed without a new package version: ($key)"
+            }
+        } else {
+            $pending ++= [
+                {file: $file, key: $key, digest: $digest}
+            ]
+        }
+    }
+
+    let upload_bytes = if ($pending | is-empty) { 0 } else {
+        $pending | each {|item| (ls $item.file | get size | first | into int) } | math sum
+    }
+
+    if ($stored_bytes + $upload_bytes) > $MAX_BUCKET_BYTES {
+        r2-fail 'R2 mirror would exceed its storage safety limit'
+    }
+
+    for item in $pending {
+        upload-r2 ...[
+            s3
+            cp
+            $item.file
+            $"s3://($R2_BUCKET)/($item.key)"
+            --cache-control
+            'public, max-age=86400'
+            --metadata
+            $"sha256=($item.digest)"
+            --only-show-errors
+        ]
+    }
+
+    upload-r2 ...[
+        s3
+        cp
+        repo/x86_64-repodata
+        $"s3://($R2_BUCKET)/($prefix)x86_64-repodata"
+        --cache-control
+        'public, max-age=60'
+        --only-show-errors
+    ]
+}
+
+def mirror-r2 []: nothing -> nothing {
+    if not ('repo/x86_64-repodata' | path exists) {
+        let index_key = $"($RELEASE_TAG)/x86_64-repodata"
+
+        let listing = (r2 ...[s3api list-objects-v2 --no-paginate --bucket $R2_BUCKET
+            --prefix $index_key --output json] | from json)
+
+        if ($listing.Contents? | default [] | any {|object| $object.Key == $index_key }) {
+            return
+        }
+
+        mkdir repo
+
+        let release = (gh release download $RELEASE_TAG --dir repo --pattern '*.xbps'
+            --pattern '*.xbps.sig2' --pattern x86_64-repodata | complete)
+
+        if $release.exit_code != 0 {
+            r2-fail $"Could not restore signed release: ($release.stderr | str trim)"
+        }
+    }
+
+    publish-r2
 }
 
 def prepare-publish []: nothing -> list<string> {
@@ -201,3 +342,5 @@ def "main restore" []: nothing -> nothing { restore }
 def "main sign" []: nothing -> nothing { sign }
 
 def "main publish" []: nothing -> nothing { publish }
+
+def "main mirror-r2" []: nothing -> nothing { mirror-r2 }
