@@ -3,8 +3,6 @@ name: publish x86_64 xbps repository
 on:
   push:
     branches: [main]
-    paths:
-      - 'srcpkgs/**'
 
 permissions:
   contents: write
