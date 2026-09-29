@@ -38,6 +38,7 @@ def check-key []: nothing -> nothing {
     if ($env.XBPS_PRIVATE_KEY | is-empty) {
         error make {
             msg: 'Missing XBPS_PRIVATE_KEY secret'
+
             label: {
                 text: 'Signing key supplied by the workflow'
                 span: (metadata $env.XBPS_PRIVATE_KEY).span
@@ -48,6 +49,8 @@ def check-key []: nothing -> nothing {
 
 def bootstrap []: nothing -> nothing {
     ^cp -a owned/srcpkgs/. void-packages/srcpkgs/
+    # xbps-src copies etc/conf into its chroot; the job environment is cleared.
+    "XBPS_ALLOW_RESTRICTED=yes\n" | save --append void-packages/etc/conf
     chown -R builder:builder void-packages
     sudo -Eu builder bash -c 'cd void-packages && ./xbps-src binary-bootstrap'
 }
@@ -75,6 +78,7 @@ def collect []: nothing -> nothing {
         if not $found {
             error make {
                 msg: $"Missing binary package: ($pkg)"
+
                 label: {
                     text: 'Requested package'
                     span: (metadata $pkg).span
@@ -138,6 +142,7 @@ def sign []: nothing -> nothing {
         if not ($index | path exists) {
             error make {
                 msg: 'Missing signed repository index'
+
                 label: {
                     text: 'Expected index path'
                     span: (metadata $index).span
