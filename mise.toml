@@ -1,0 +1,5 @@
+[tools]
+"aqua:mvdan/sh" = "latest"
+"aqua:tombi-toml/tombi" = "latest"
+"github:0hirume/breathers" = "latest"
+"npm:bash-language-server" = "latest"
