@@ -171,6 +171,24 @@ def restore []: nothing -> nothing {
 def sign []: nothing -> nothing {
     check-key
 
+    let templates = (glob 'owned/srcpkgs/*/template' |
+        each {|file| $file | path dirname | path basename })
+
+    if ($templates | is-empty) {
+        r2-fail 'No owned package templates found; refusing to sign repository'
+    }
+
+    for old in (glob 'repo/*.xbps') {
+        let oldver = xbps-uhelper binpkgver $old | str trim
+        let oldname = xbps-uhelper getpkgname $oldver | str trim
+
+        if not ($templates | any {|template|
+            $oldname == $template or ($oldname | str starts-with $"($template)-")
+        }) {
+            rm --force $old $"($old).sig2"
+        }
+    }
+
     for current in (glob 'new/*.xbps') {
         let pkgver = xbps-uhelper binpkgver $current | str trim
         let name = xbps-uhelper getpkgname $pkgver | str trim
@@ -201,6 +219,7 @@ def sign []: nothing -> nothing {
         }
 
         xbps-rindex -a ...(glob 'repo/*.xbps')
+        xbps-rindex -c repo/
         xbps-rindex --sign --signedby void-extra --privkey $key repo/
 
         let index = 'repo/x86_64-repodata'
