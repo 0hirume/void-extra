@@ -1,0 +1,102 @@
+name: publish x86_64 xbps repository
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'srcpkgs/**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: x86_64-current
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/void-linux/void-glibc-full@sha256:c23266033da422c47d350ae3f7bb4fdfecf543cc7693a90d1f343960f9767c57
+      options: --privileged
+      volumes:
+        - /dev:/dev
+    defaults:
+      run:
+        shell: nu {0}
+    env:
+      XBPS_ALLOW_RESTRICTED: 'yes'
+    steps:
+      - name: prepare void container
+        shell: sh
+        run: |
+          set -eu
+          xbps-install -Syu xbps
+          xbps-install -yu
+          xbps-install -y bash git curl sudo github-cli nushell
+          useradd -G xbuilder -M builder
+
+      - name: checkout owned templates
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: owned
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: select changed packages
+        id: changes
+        working-directory: owned
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: nu .github/scripts/publish.nu changes
+
+      - name: check signing key
+        if: steps.changes.outputs.packages != ''
+        env:
+          XBPS_PRIVATE_KEY: ${{ secrets.XBPS_PRIVATE_KEY }}
+        run: nu owned/.github/scripts/publish.nu check-key
+
+      - name: checkout upstream build machinery
+        if: steps.changes.outputs.packages != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: void-linux/void-packages
+          path: void-packages
+          persist-credentials: false
+
+      - name: overlay templates and bootstrap
+        if: steps.changes.outputs.packages != ''
+        run: nu owned/.github/scripts/publish.nu bootstrap
+
+      - name: build changed packages
+        if: steps.changes.outputs.packages != ''
+        env:
+          PACKAGES: ${{ steps.changes.outputs.packages }}
+        run: nu owned/.github/scripts/publish.nu build
+
+      - name: collect owned binary packages
+        if: steps.changes.outputs.packages != ''
+        env:
+          PACKAGES: ${{ steps.changes.outputs.packages }}
+        run: nu owned/.github/scripts/publish.nu collect
+
+      - name: restore current release assets
+        if: steps.changes.outputs.packages != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: nu owned/.github/scripts/publish.nu restore
+
+      - name: merge and sign repository
+        if: steps.changes.outputs.packages != ''
+        env:
+          XBPS_PRIVATE_KEY: ${{ secrets.XBPS_PRIVATE_KEY }}
+        run: nu owned/.github/scripts/publish.nu sign
+
+      - name: publish packages before index
+        if: steps.changes.outputs.packages != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: nu owned/.github/scripts/publish.nu publish
