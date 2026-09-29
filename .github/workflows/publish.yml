@@ -24,6 +24,8 @@ jobs:
         shell: nu {0}
     env:
       XBPS_ALLOW_RESTRICTED: 'yes'
+      # GitHub containers block the user namespace required by uunshare.
+      XBPS_CHROOT_CMD: uchroot
     steps:
       - name: prepare void container
         shell: sh
